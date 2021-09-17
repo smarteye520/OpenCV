@@ -1,0 +1,726 @@
+        GNU Library  - OpenCV
+
+
+
+
+
+//
+//  ViewController.h
+//  blocktag
+//
+//  Created by Chun Ming Chin on 1/9/19.
+//  Copyright © 2019 chunmingchin. All rights reserved.
+//
+
+
+#import <opencv2/opencv.hpp>
+#import <opencv2/videoio/cap_ios.h>
+#import <opencv2/imgproc/imgproc.hpp>
+#import <opencv2/highgui/highgui.hpp>
+#import <AVFoundation/AVFoundation.h>
+#import <UIKit/UIKit.h>
+#import <stdio.h>
+#import <iostream>
+#import <gsl/gsl_bspline.h>
+#import <gsl/gsl_multifit.h>
+#import <gsl/gsl_rng.h>
+#import <gsl/gsl_randist.h>
+#import <gsl/gsl_statistics.h>
+#define N 200
+#define NCOEFFS 12
+#define NBREAK (NCOEFFS - 2)
+
+using namespace cv;
+using namespace std;
+@interface ViewController : UIViewController<CvVideoCameraDelegate>
+{
+    //MARK: Properties
+    __weak IBOutlet UIButton *button;
+    __weak IBOutlet UIImageView *imageView;
+    __weak IBOutlet UIButton *flashButton;
+    
+    CvVideoCamera* videoCamera;
+    bool flashOn;
+    
+}
+
+//MARK: Actions
+- (IBAction)actionStart:(id)sender;
+- (IBAction)toggleFlashButton:(UIButton *)sender;
+
+- (void)writeToTextFile:(NSString*) docsPath fileManager:(NSFileManager*) fileMgr gridNumber:(int)gridNum histogramRvalues:(float[2][2][256])histoRval histogramGvalues:(float[2][2][256])histoGval histogramBvalues:(float[2][2][256])histoBval histogramAvalues:(float[2][2][256])histoAval textFileName:(NSString*)txtFName startBucket:(int)strtBkt endBucket:(int) endBkt;
+
+- (void) writeToImageFile:(NSString*)docsPath fileManager:(NSFileManager*)filemgr sourceImage:(Mat4b*)srcImg imageFileName:(NSString*)imgFName;
+
+
+- (void)computeSmoothingLine:(NSString*) docsPath fileManager:(NSFileManager*) fileMgr gridNumber:(int)gridNum histogramRvalues:(float[2][2][256])histoRval histogramGvalues:(float[2][2][256])histoGval histogramBvalues:(float[2][2][256])histoBval histogramAvalues:(float[2][2][256])histoAval textFileName:(NSString*)txtFName startBucket:(int)strtBkt endBucket:(int) endBkt; // Method declaration
+
+@property (nonatomic, retain) CvVideoCamera* videoCamera;
+@property (nonatomic) bool flashOn;
+//@property (nonatomic) Mat* imagePtr;
+
+
+@end
+
+//
+//  ViewController.m
+//  blocktag
+//
+//  Created by Chun Ming Chin on 1/9/19.
+//  Copyright © 2019 chunmingchin. All rights reserved.
+//
+
+#import "ViewController.h"
+
+@implementation ViewController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    // Do any additional setup after loading the view, typically from a nib.
+    
+    self.videoCamera = [[CvVideoCamera alloc] initWithParentView:imageView];
+    self.videoCamera.delegate = self; // Set CvVideoCameraDelegate specified in ViewController.h as delegate to video cam
+    
+    self.videoCamera.defaultAVCaptureDevicePosition = AVCaptureDevicePositionBack;
+    self.videoCamera.defaultAVCaptureSessionPreset = AVCaptureSessionPresetHigh; //Preset high dimension is 1280x720
+    self.videoCamera.defaultAVCaptureVideoOrientation = AVCaptureVideoOrientationPortrait;
+    self.videoCamera.defaultFPS = 30;
+    //self.videoCamera.grayscale = NO; //Property grayscale not found
+    //self.videoCamera.contentMode = UIViewContentMode.ScaleAspectFit
+    
+    self->imageView.frame = CGRectMake(0,0,720,1280);
+    self->imageView.center = self->imageView.superview.center;
+    
+    [self.videoCamera start];
+
+
+}
+
+#pragma mark - Protocol CvVideoCameraDelegate
+
+#ifdef __cplusplus
+- (void)processImage:(Mat&)image;
+{
+    // Do some OpenCV stuff with the image
+    
+    Mat image_copy, image_gray;
+    cvtColor(image, image_copy, COLOR_BGRA2BGR);
+    cvtColor(image, image_gray, COLOR_BGR2GRAY);
+
+    /// Reduce the noise so we avoid false circle detection
+    GaussianBlur( image_gray, image_gray, cv::Size(9, 9), 2, 2 );
+
+    vector<Vec3f> circles; // From std library
+    int minDistCircCenters = image_gray.rows/8;
+    int cannyEdgeUpperThresh = 80; // Has to be manually set
+    int centerDetectUpperThresh = 100;
+    int minRadius = 5;
+    int maxRadius = 0;
+    HoughCircles(image_gray, circles, HOUGH_GRADIENT, 1, minDistCircCenters, cannyEdgeUpperThresh, centerDetectUpperThresh, minRadius, maxRadius);
+    
+    /// Draw the detected circles
+    for( size_t i = 0; i < circles.size(); i++ ) // Sometimes circles has x=0,y=0,radius=0
+    {
+        cv::Point center(cvRound(circles[i][0]), cvRound(circles[i][1]));
+        double radius = cvRound(circles[i][2]);
+        // circle center
+        
+        //cout << "Test," << i << "," << radius;
+        cv::Point vertLineStart;
+        cv::Point horiLineStart;
+        cv::Point vertLineEnd;
+        cv::Point horiLineEnd;
+        int gridNum = 2;
+        int xCoordArray[gridNum+1];
+        int yCoordArray[gridNum+1];
+        int xdx = 0;
+        int ydx = gridNum;
+        int offsetX = center.x-radius;
+        int offsetY = center.y-radius;
+        int coinLeftBound = center.x-radius;
+        int coinTopBound = center.y-radius;
+        int coinRightBound = center.x+radius;
+        int coinBottomBound = center.y+radius;
+        
+        if(circles[0][0]>0 && circles[0][1]>0 && circles[0][2]>0 && coinLeftBound>=0 && coinTopBound>=0 && coinRightBound<=720 && coinBottomBound<=1280  ) {
+            
+            //=====================================
+            // Render circle and grid system
+            //=====================================
+            circle( image, center, 3, Scalar(0,255,0), 1, 8, 0 ); // thickness, linetype, coordinate fractional bits
+            // circle outline
+            circle( image, center, radius, Scalar(0,255,0), 1  , 8, 0 );
+            
+            for (int i=-gridNum; i<=0; i=i+1) { // -10 to 10
+                vertLineStart.x = center.x + radius*double(cos((M_PI*i/gridNum))); // Traverses top half hemisphere from left to right
+                
+                xCoordArray[xdx] = vertLineStart.x - offsetX; // Radius offset due to cropping later
+                //NSLog(@"x index at %d is %d", xdx, xCoordArray[xdx]);
+                xdx++;
+                
+                vertLineStart.y = center.y + radius*double(sin((M_PI*i/gridNum)));
+                vertLineEnd.x = vertLineStart.x;
+                vertLineEnd.y = center.y - radius*double(sin((M_PI*i/gridNum))); // Flip sign to
+                
+                horiLineStart.x = center.x + radius*double(cos((M_PI*i/gridNum)-M_PI_2)); // Traverses left hemisphere from bottom to top
+                horiLineStart.y = center.y + radius*double(sin((M_PI*i/gridNum)-M_PI_2));
+                yCoordArray[ydx] = horiLineStart.y - offsetY;
+                //NSLog(@"y index at %d is %d", ydx, yCoordArray[ydx]);
+                ydx--;
+                
+                horiLineEnd.x = center.x - radius*double(cos((M_PI*i/gridNum)-M_PI_2)); // Flip sign to reflect about y-axis
+                horiLineEnd.y = horiLineStart.y;
+                
+                line( image, vertLineStart, vertLineEnd, Scalar(0,255,0),1,8,0);
+                line( image, horiLineStart, horiLineEnd, Scalar(0,255,0),1,8,0);
+            
+            }
+            
+            //=====================================
+            // Draw mask: White circle on black background
+            //=====================================
+            Mat1b mask(image.size(), uchar(0)); // Templated version for <uchar> type
+            circle(mask, center, radius, Scalar(255), FILLED);
+            
+            cv::Rect bbox(offsetX, offsetY, 2*radius, 2*radius); // Compute bounding box
+            
+            Mat4b res(image.size(), Vec4b(0,0,0,0)); // Create new black image
+            image.copyTo(res,mask); // Copy only image under white circle to black image
+            res = res(bbox); // Crop according to ROI
+            
+            //=====================================
+            // Print cropped image to .png preview (Action Start copy)
+            //=====================================
+            NSFileManager *filemgr;
+            filemgr = [NSFileManager defaultManager];
+            
+            NSString *docsPath = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+            
+            NSString *imgFName = @"img";
+            NSString *pngName = @".png";
+
+            NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+            [formatter setDateFormat:@"_HH-mm-ss-SSSS"];
+            NSString* timeStamp = [formatter stringFromDate:[NSDate date]];
+            
+            NSString* imgFNameTimeStamped = [imgFName stringByAppendingString:timeStamp];
+            NSString* imgFNameTimeStampedPng = [imgFNameTimeStamped stringByAppendingString:pngName];
+            [self writeToImageFile:docsPath fileManager:filemgr sourceImage:&res imageFileName:imgFNameTimeStampedPng];
+
+            
+            
+            
+            //=====================================
+            // Print BGR values to text file
+            //=====================================
+            // Initialize BGR histograms
+            float histoBval[2][2][256];
+            float histoGval[2][2][256];
+            float histoRval[2][2][256];
+            float histoAval[2][2][256];
+            for(int row=0; row<gridNum; row++) { // Check/Initialize to zeros
+                for(int col=0; col<gridNum; col++) {
+                    for(int valueIdx=0; valueIdx<256; valueIdx++) {
+                        histoBval[row][col][valueIdx]=0; // Initialize to zero
+                        histoGval[row][col][valueIdx]=0;
+                        histoRval[row][col][valueIdx]=0;
+                        histoAval[row][col][valueIdx]=0;
+
+                        //NSLog(@"Initial BRow:%d, Col:%d, Val:%d freq is %d", row, col, valueIdx, histoBval[row][col][valueIdx]);
+                    }
+                }
+            }
+            
+
+                    
+            // Compute aggregate pixel region level values
+            for(int row=0; row<gridNum; row++) {
+                for(int col=0; col<gridNum; col++) {
+                    
+                    for(int i=yCoordArray[row]; i<yCoordArray[row+1]; i++) {
+                        for(int j=xCoordArray[col]; j<xCoordArray[col+1]; j++) {
+                            
+                            
+                            Vec4b bgraPix = res.at<Vec4b>(i,j);
+                            uchar bPix = bgraPix.val[0];
+                            uchar gPix = bgraPix.val[1];
+                            uchar rPix = bgraPix.val[2];
+                            uchar aPix = bgraPix.val[3];
+
+                            
+                            
+                            //NSLog(@"xCoordArray:%d", xCoordArray[col]);
+                            //NSLog(@"yCoordArray:%d", yCoordArray[row]);
+                            //NSLog(@"i:%d", i);
+                            //NSLog(@"j:%d", j);
+                            
+                            //NSLog(@"x index at %d is %d", 0, xCoordArray[0]);
+                            //NSLog(@"x index at %d is %d", 1, xCoordArray[1]);
+                            //NSLog(@"x index at %d is %d", 2, xCoordArray[2]);
+                            //NSLog(@"y index at %d is %d", 0, yCoordArray[0]);
+                            //NSLog(@"y index at %d is %d", 1, yCoordArray[1]);
+                            //NSLog(@"y index at %d is %d", 2, yCoordArray[2]);
+                            
+
+                    
+                            /*
+                             // Write pixel level values
+                             [fileHandleBGRA seekToEndOfFile];
+                             NSString* stringBGRA= [NSString stringWithFormat:@"%d;",(int)bgrPixel.val[3]];
+                             NSData *dataA = [stringBGRA dataUsingEncoding:NSUTF8StringEncoding];
+                             [fileHandleBGRA writeData:dataA];
+                             */
+                            
+
+                            if ((int)aPix!=0) {
+                            //if ((int)bgrPixel.val[3]!=0 && j >= xCoordArray[col] && j< xCoordArray[col+1] && i >=yCoordArray[row] && i< yCoordArray[row+1]) {
+                                //NSLog(@"Hello");
+                                
+                                histoBval[row][col][(int)bPix]++;
+                                histoGval[row][col][(int)gPix]++;
+                                histoRval[row][col][(int)rPix]++;
+                                histoAval[row][col][(int)aPix]++;
+
+                                //NSLog(@"i:%d", i);
+                                //NSLog(@"j:%d", j);
+
+                                //NSLog(@"B:%d", (int)bPix );
+                                //NSLog(@"G:%d", (int)gPix );
+                                //NSLog(@"R:%d", (int)rPix );
+                                //NSLog(@"A:%d", (int)aPix );
+
+                                //break;
+                            }
+                        } // end pix level col
+                    } // end pix level row
+                } // end aggregate pix col
+                
+                
+                /*
+                // Write pixel level new line
+                [fileHandleBGRA seekToEndOfFile];
+                NSString* strNewLineA = [NSString stringWithFormat:@"\n"];
+                NSData *dataNewLineA = [strNewLineA dataUsingEncoding:NSUTF8StringEncoding];
+                [fileHandleBGRA writeData:dataNewLineA];
+                */
+                
+            } // end aggregate pix row
+
+            // Find max BGR values
+            // Truncate end shades 0-7 and 248-255
+            float bValMax=0;
+            float gValMax=0;
+            float rValMax=0;
+            float aValMax=0;
+            int startBucket=8; //0
+            int endBucket=248; //256
+            for(int row=0; row<gridNum; row++) {
+                for(int col=0; col<gridNum; col++) {
+                    for(int valueIdx=startBucket; valueIdx<endBucket; valueIdx++) {
+                        
+                        if (histoBval[row][col][valueIdx]>bValMax) {
+                            bValMax = histoBval[row][col][valueIdx];
+                        }
+                        if (histoGval[row][col][valueIdx]>gValMax) {
+                            gValMax = histoGval[row][col][valueIdx];
+                        }
+                        if (histoRval[row][col][valueIdx]>rValMax) {
+                            rValMax = histoRval[row][col][valueIdx];
+                        }
+                        if (histoAval[row][col][valueIdx]>aValMax) {
+                            aValMax = histoAval[row][col][valueIdx];
+                        }
+                    }
+                }
+            }
+            //NSLog(@"B:%f", bValMax );
+            //NSLog(@"G:%f", gValMax );
+            //NSLog(@"R:%f", rValMax );
+            //NSLog(@"A:%f", aValMax );
+            
+            // Initialize BGR histograms percent value using
+            // max pixel value as denominator
+            float histoBvalPercen[2][2][256]; //256
+            float histoGvalPercen[2][2][256];
+            float histoRvalPercen[2][2][256];
+            float histoAvalPercen[2][2][256];
+            for(int row=0; row<gridNum; row++) { // Check/Initialize to zeros
+                for(int col=0; col<gridNum; col++) {
+                    for(int valueIdx=startBucket; valueIdx<endBucket; valueIdx++) {
+                        histoBvalPercen[row][col][valueIdx]=histoBval[row][col][valueIdx]/bValMax;
+                        histoGvalPercen[row][col][valueIdx]=histoGval[row][col][valueIdx]/gValMax;
+                        histoRvalPercen[row][col][valueIdx]=histoRval[row][col][valueIdx]/rValMax;
+                        histoAvalPercen[row][col][valueIdx]=histoAval[row][col][valueIdx]/aValMax;
+                    }
+                }
+            }
+            
+            
+            
+            NSString *txtName = @".txt";
+            NSString *txtFNameCount = @"RGBMap_AggCount";
+            NSString* txtFNameCountTimeStamped = [txtFNameCount stringByAppendingString:timeStamp];
+            NSString* txtFNameCountTimeStampedPng = [txtFNameCountTimeStamped stringByAppendingString:txtName];
+            [self writeToTextFile:docsPath fileManager:filemgr gridNumber:2 histogramRvalues:histoRval histogramGvalues:histoGval histogramBvalues:histoBval histogramAvalues:histoAval textFileName:txtFNameCountTimeStampedPng startBucket:startBucket endBucket:endBucket];
+
+            NSString *txtFNamePercen = @"RGBMap_AggPercen";
+            NSString* txtFNamePercenTimeStamped = [txtFNamePercen stringByAppendingString:timeStamp];
+            NSString* txtFNamePercenTimeStampedPng = [txtFNamePercenTimeStamped stringByAppendingString:txtName];
+            [self writeToTextFile:docsPath fileManager:filemgr gridNumber:2 histogramRvalues:histoRvalPercen histogramGvalues:histoGvalPercen histogramBvalues:histoBvalPercen histogramAvalues:histoAvalPercen textFileName:txtFNamePercenTimeStampedPng startBucket:startBucket endBucket:endBucket];
+
+
+        } // If circle is valid
+
+        
+        // 8Unsigned Char, 4 channel (Type 24)
+        //cout << "Image Depth:" << image.depth() << ",";
+        //cout << "Image Type:" << image.type() << ",";
+        //cout << "Image Channels:" << image.channels() << ",";
+        //self.imagePtr = &image;
+        
+
+    }
+}
+#endif
+
+
+- (void) writeToImageFile:(NSString*)docsPath fileManager:(NSFileManager*)filemgr sourceImage:(Mat4b*)srcImg imageFileName:(NSString*)imgFName {
+    NSString *filePath = [docsPath stringByAppendingPathComponent:imgFName];
+    NSLog(@"%@", imgFName);
+    
+    NSURL *fileUrl = [NSURL fileURLWithPath:filePath];
+    
+    // Check if file exists
+    if ([filemgr fileExistsAtPath:[fileUrl path]] == YES) {
+        NSLog(@"Image File exists");
+    }
+    //else {NSLog(@"File not found");}
+    
+    if ([filemgr isWritableFileAtPath:filePath] == NO) {
+        NSLog(@"File is read only");
+    }
+    //else{NSLog(@"File is writable");}
+    
+    const char* filePathC = [filePath cStringUsingEncoding:NSMacOSRomanStringEncoding];
+    const cv::String thisPath = (const cv::String) filePathC;
+    cv::imwrite(thisPath, *srcImg);
+    
+}
+
+- (void) writeToTextFile:(NSString*)docsPath fileManager:(NSFileManager*)filemgr gridNumber:(int)gridNum histogramRvalues:(float[2][2][256])histoRval histogramGvalues:(float[2][2][256])histoGval histogramBvalues:(float[2][2][256])histoBval histogramAvalues:(float[2][2][256])histoAval textFileName:(NSString*)txtFName startBucket:(int)strtBkt endBucket:(int) endBkt {
+    
+    NSLog(@"%@", txtFName);
+    // Aggregate pixel level file
+    NSString *filePathBGR_agg = [docsPath stringByAppendingPathComponent:txtFName];
+    NSURL *fileUrlBGR_agg = [NSURL fileURLWithPath:filePathBGR_agg];
+    if ([filemgr fileExistsAtPath:[fileUrlBGR_agg path]] == YES) {
+        NSLog(@"File_Agg exists, overide old file");
+        [filemgr createFileAtPath:filePathBGR_agg contents:nil attributes:nil];
+    }
+    else {
+        NSLog(@"File_Agg not found, create new file");
+        [filemgr createFileAtPath:filePathBGR_agg contents:nil attributes:nil];
+    }
+    NSFileHandle *fileHandleBGR_agg = [NSFileHandle fileHandleForWritingAtPath:filePathBGR_agg];
+    if (fileHandleBGR_agg == nil) NSLog(@"Failed to open file");
+    
+    // Write aggregate pixel region level values
+    NSString* stringR_agg;
+    NSData *dataR_agg;
+    NSString* stringG_agg;
+    NSData *dataG_agg;
+    NSString* stringB_agg;
+    NSData *dataB_agg;
+    NSString* stringA_agg;
+    NSData *dataA_agg;
+    for(int row=0; row<gridNum; row++) {
+        for(int col=0; col<gridNum; col++) {
+            
+            for(int valueIdx=0; valueIdx<256; valueIdx++) { // Sweep Red
+                //NSLog(@"BRow:%d, Col:%d, Val:%d freq is %d", row, col, valueIdx, histoBval[row][col][valueIdx]);
+                //NSLog(@"GRow:%d, Col:%d, Val:%d freq is %d", row, col, valueIdx, histoGval[row][col][valueIdx]);
+                //NSLog(@"RRow:%d, Col:%d, Val:%d freq is %d", row, col, valueIdx, histoRval[row][col][valueIdx]);
+                
+                [fileHandleBGR_agg seekToEndOfFile];
+                
+                if (valueIdx!=255) { // Check if it's last index
+                    stringR_agg = [NSString stringWithFormat:@"%f,",histoRval[row][col][valueIdx]];
+                } else {
+                    stringR_agg = [NSString stringWithFormat:@"%f",histoRval[row][col][valueIdx]];
+                }
+                dataR_agg = [stringR_agg dataUsingEncoding:NSUTF8StringEncoding];
+                [fileHandleBGR_agg writeData:dataR_agg];
+                
+            } // end of 256 red sweep
+            
+            // Write aggregate pixel level semicolon separator per col
+            [fileHandleBGR_agg seekToEndOfFile];
+            NSString* strSemiColon_agg = [NSString stringWithFormat:@";"];
+            NSData *dataSemiColon_agg = [strSemiColon_agg dataUsingEncoding:NSUTF8StringEncoding];
+            [fileHandleBGR_agg writeData:dataSemiColon_agg];
+            
+            
+            for(int valueIdx=0; valueIdx<256; valueIdx++) { // Sweep Green
+                
+                [fileHandleBGR_agg seekToEndOfFile];
+                if (valueIdx!=255) { // Check if it's last index
+                    stringG_agg = [NSString stringWithFormat:@"%f,",histoGval[row][col][valueIdx]];
+                }
+                else {
+                    stringG_agg = [NSString stringWithFormat:@"%f",histoGval[row][col][valueIdx]];
+                }
+                dataG_agg = [stringG_agg dataUsingEncoding:NSUTF8StringEncoding];
+                [fileHandleBGR_agg writeData:dataG_agg];
+                
+            } // end of 256 green sweep
+            
+            // Write aggregate pixel level semicolon separator per col
+            [fileHandleBGR_agg seekToEndOfFile];
+            [fileHandleBGR_agg writeData:dataSemiColon_agg];
+            
+            for(int valueIdx=0; valueIdx<256; valueIdx++) { // Sweep Blue
+                
+                [fileHandleBGR_agg seekToEndOfFile];
+                if (valueIdx!=255) { // Check if it's last index
+                    stringB_agg = [NSString stringWithFormat:@"%f,",histoBval[row][col][valueIdx]];
+                }
+                else {
+                    stringB_agg = [NSString stringWithFormat:@"%f",histoBval[row][col][valueIdx]];
+                }
+                dataB_agg = [stringB_agg dataUsingEncoding:NSUTF8StringEncoding];
+                [fileHandleBGR_agg writeData:dataB_agg];
+                
+            } // end of 256 blue sweep
+            
+            // Write aggregate pixel level semicolon separator per col
+            [fileHandleBGR_agg seekToEndOfFile];
+            [fileHandleBGR_agg writeData:dataSemiColon_agg];
+            
+            
+            for(int valueIdx=0; valueIdx<256; valueIdx++) { // Sweep Alpha
+                
+                [fileHandleBGR_agg seekToEndOfFile];
+                if (valueIdx!=255) { // Check if it's last index
+                    stringA_agg = [NSString stringWithFormat:@"%f,",histoAval[row][col][valueIdx]];
+                }
+                else {
+                    stringA_agg = [NSString stringWithFormat:@"%f",histoAval[row][col][valueIdx]];
+                }
+                dataA_agg = [stringA_agg dataUsingEncoding:NSUTF8StringEncoding];
+                [fileHandleBGR_agg writeData:dataA_agg];
+                
+            } // end of 256 alpha sweep
+            
+            // Write aggregate pixel level semicolon separator per col
+            [fileHandleBGR_agg seekToEndOfFile];
+            [fileHandleBGR_agg writeData:dataSemiColon_agg];
+            
+            // Write aggregate pixel level tab separator per col
+            if (col<gridNum-1) { // Don't put tab after col=1
+                [fileHandleBGR_agg seekToEndOfFile];
+                NSString* strTab_agg = [NSString stringWithFormat:@"\t"];
+                NSData *dataTab_agg = [strTab_agg dataUsingEncoding:NSUTF8StringEncoding];
+                [fileHandleBGR_agg writeData:dataTab_agg];
+            }
+            
+        } // end of each col
+        
+        
+        // Write aggregate pixel level new line per row
+        if (row<gridNum-1) { // Don't put newline after row=1
+            [fileHandleBGR_agg seekToEndOfFile];
+            NSString* strNewLine_agg = [NSString stringWithFormat:@"\n"];
+            NSData *dataNewLine_agg = [strNewLine_agg dataUsingEncoding:NSUTF8StringEncoding];
+            [fileHandleBGR_agg writeData:dataNewLine_agg];
+        }
+        
+        
+    }
+    
+    
+    
+    //[fileHandleBGRA closeFile];
+    [fileHandleBGR_agg closeFile];
+
+}
+
+- (void) computeSmoothingLine:(NSString*)docsPath fileManager:(NSFileManager*)filemgr gridNumber:(int)gridNum histogramRvalues:(float[2][2][256])histoRval histogramGvalues:(float[2][2][256])histoGval histogramBvalues:(float[2][2][256])histoBval histogramAvalues:(float[2][2][256])histoAval textFileName:(NSString*)txtFName startBucket:(int)strtBkt endBucket:(int) endBkt {
+    
+    
+    const size_t n = N;
+    const size_t ncoeffs = NCOEFFS;
+    const size_t nbreak = NBREAK;
+    
+    
+    size_t i, j;
+    
+    
+    gsl_bspline_workspace *bw; // Pre-allocate workspace
+    gsl_vector *B;
+    
+    double dy;
+    gsl_rng *r;
+    gsl_vector *c, *w;
+    gsl_vector *x, *y;
+    gsl_matrix *X, *cov;
+    gsl_multifit_linear_workspace *mw;
+    double chisq, Rsq, dof, tss;
+
+    
+    gsl_rng_env_setup(); // Random number generator
+    //r = gsl_rng_alloc(gsl_rng_default);
+    
+    /*
+    bw = gsl_bspline_alloc(4, nbreak);
+    B = gsl_vector_alloc(ncoeffs);
+    
+    x = gsl_vector_alloc(n);
+    y = gsl_vector_alloc(n);
+    X = gsl_matrix_alloc(n, ncoeffs);
+    c = gsl_vector_alloc(ncoeffs);
+    w = gsl_vector_alloc(n);
+    cov = gsl_matrix_alloc(ncoeffs, ncoeffs);
+    mw = gsl_multifit_linear_alloc(n, ncoeffs);
+    
+    
+    
+    for (i = 0; i < n; ++i)
+    {
+        double sigma;
+        double xi = (15.0 / (N - 1)) * i;
+        double yi = cos(xi) * exp(-0.1 * xi);
+        
+        sigma = 0.1 * yi;
+        dy = gsl_ran_gaussian(r, sigma);
+        yi += dy;
+        
+        gsl_vector_set(x, i, xi);
+        gsl_vector_set(y, i, yi);
+        gsl_vector_set(w, i, 1.0 / (sigma * sigma));
+        
+        printf("%f %f\n", xi, yi);
+    }
+    
+    gsl_bspline_knots_uniform(0.0, 15.0, bw);
+    
+    for (i = 0; i < n; ++i)
+    {
+        double xi = gsl_vector_get(x, i);
+        
+        gsl_bspline_eval(xi, B, bw);
+        
+        for (j = 0; j < ncoeffs; ++j)
+        {
+            double Bj = gsl_vector_get(B, j);
+            gsl_matrix_set(X, i, j, Bj);
+        }
+    }
+    
+    gsl_multifit_wlinear(X, w, y, c, cov, &chisq, mw);
+    
+    dof = n - ncoeffs;
+    tss = gsl_stats_wtss(w->data, 1, y->data, 1, y->size);
+    Rsq = 1.0 - chisq / tss;
+    
+    fprintf(stderr, "chisq/dof = %e, Rsq = %f\n",
+            chisq / dof, Rsq);
+    
+    printf("\n\n");
+    
+    {
+        double xi, yi, yerr;
+        
+        for (xi = 0.0; xi < 15.0; xi += 0.1)
+        {
+            gsl_bspline_eval(xi, B, bw);
+            gsl_multifit_linear_est(B, c, cov, &yi, &yerr);
+            printf("%f %f\n", xi, yi);
+        }
+    }
+    
+    gsl_rng_free(r);
+    gsl_bspline_free(bw);
+    gsl_vector_free(B);
+    gsl_vector_free(x);
+    gsl_vector_free(y);
+    gsl_matrix_free(X);
+    gsl_vector_free(c);
+    gsl_vector_free(w);
+    gsl_matrix_free(cov);
+    gsl_multifit_linear_free(mw);
+    
+     */
+}
+
+#pragma mark - UI Actions
+
+- (IBAction)actionStart:(id)sender {
+    NSFileManager *filemgr;
+    filemgr = [NSFileManager defaultManager];
+    
+    NSString *docsPath = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+    NSString *filePath = [docsPath stringByAppendingPathComponent:@"myFile.txt"];
+    NSLog(@"%@", filePath);
+    
+    NSURL *fileUrl = [NSURL fileURLWithPath:filePath];
+    
+    // Check if file exists
+    if ([filemgr fileExistsAtPath:[fileUrl path]] == YES) {
+        NSLog(@"File exists");
+    }
+    else {
+        NSLog(@"File not found");
+    }
+    
+    if ([filemgr isWritableFileAtPath:filePath] == YES) {
+        NSLog(@"File is writable");
+    }
+    else{
+        NSLog(@"File is read only");
+    }
+    
+    // Read from most recent image
+    //Mat image = *self.imagePtr;
+    
+    //NSString *strA = @"Test1 \n Test2";
+    //[strA writeToFile:filePath atomically:YES encoding:NSUTF8StringEncoding error:nil]; // Overides previous file
+    
+    /*
+    int myScore = 0;
+    NSData *packet = [NSData dataWithBytes:&myScore length:sizeof(int)];
+    bool flag = [filemgr createFileAtPath:filePath contents:packet attributes:nil];
+    if (flag == YES) {
+        NSLog(@"File write successful");
+    }
+    else {
+        NSLog(@"File write failed");
+    }
+    */
+
+    
+}
+
+- (IBAction)toggleFlashButton:(UIButton *)sender {
+
+    Class captureDeviceClass = NSClassFromString(@"AVCaptureDevice");
+    if (captureDeviceClass != nil) {
+        AVCaptureDevice *device = [AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeVideo];
+        if ([device hasTorch] && [device hasFlash]) {
+            [device lockForConfiguration:nil];
+            if (self.flashOn==false) {
+                [device setTorchMode:AVCaptureTorchModeOn];
+                //[device setFlashMode:AVCaptureFlashModeOn];
+                self.flashOn=true;
+            }
+            else {
+                [device setTorchMode:AVCaptureTorchModeOff];
+                //[device setFlashMode:AVCaptureFlashModeOff];
+                self.flashOn=false;
+            }
+            [device unlockForConfiguration];
+        }
+    }
+    
+}
+
+@end
